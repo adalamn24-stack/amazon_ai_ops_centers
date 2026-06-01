@@ -2,20 +2,33 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+from uuid import uuid4
+
+import pandas as pd
 import streamlit as st
+from docx import Document
+
 
 from services.database import (
     Project,
+    ProjectFile,
+    add_project_file,
     create_project,
     delete_project,
     get_project,
     initialize_database,
+    list_project_files,
     list_projects,
     update_project,
 )
 from services.project_files import create_project_folders, project_root
 
 APP_TITLE = "Amazon AI Operation Command Center V1.0"
+ALLOWED_FILE_TYPES = ["xlsx", "csv", "docx", "pdf", "jpg", "png", "txt"]
+IMAGE_FILE_TYPES = {"jpg", "png"}
+TEXT_PREVIEW_LIMIT = 2_000
 NAV_ITEMS = [
     "项目资料中心",
     "竞品分析",
@@ -122,7 +135,7 @@ def render_navigation() -> str:
 def render_project_profile(project: Project | None) -> None:
     """Render the editable project profile center."""
     st.header("项目资料中心")
-    st.caption("第一阶段仅保存项目基础资料，为后续 AI 分析模块提供统一数据来源。")
+    st.caption("第二阶段支持上传与解析项目资料，为后续 AI 分析模块提供统一数据来源。")
 
     if project is None:
         st.info("请在左侧创建或选择一个产品项目。")
@@ -176,6 +189,166 @@ def render_project_profile(project: Project | None) -> None:
     col3.metric("类目", project.category or "未设置")
     st.code(f"uploads: {upload_dir}\noutputs: {output_dir}", language="text")
 
+    st.divider()
+    render_file_upload_center(project)
+
+
+def sanitize_filename(filename: str) -> str:
+    """Return a filesystem-safe filename while preserving a readable stem."""
+    path_name = Path(filename).name.strip()
+    stem = Path(path_name).stem or "upload"
+    suffix = Path(path_name).suffix.lower()
+    safe_stem = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", stem).strip("._-")
+    return f"{safe_stem or 'upload'}{suffix}"
+
+
+def relative_display_path(path: Path) -> str:
+    """Prefer a project-local relative path in SQLite so paths remain portable."""
+    try:
+        return str(path.relative_to(Path(__file__).resolve().parent))
+    except ValueError:
+        return str(path)
+
+
+def save_uploaded_file(project_id: str, uploaded_file) -> ProjectFile:
+    """Persist one Streamlit upload to the project uploads folder and SQLite."""
+    upload_dir = project_root(project_id) / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    original_name = Path(uploaded_file.name).name
+    safe_name = sanitize_filename(original_name)
+    file_type = Path(safe_name).suffix.lower().lstrip(".")
+    saved_name = f"{uuid4().hex[:12]}_{safe_name}"
+    saved_path = upload_dir / saved_name
+
+    with saved_path.open("wb") as destination:
+        destination.write(uploaded_file.getbuffer())
+
+    return add_project_file(
+        project_id=project_id,
+        filename=original_name,
+        file_type=file_type,
+        saved_path=relative_display_path(saved_path),
+    )
+
+
+def resolve_saved_path(saved_path: str) -> Path:
+    """Resolve a SQLite saved path back to a local file path."""
+    path = Path(saved_path)
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().parent / path
+
+
+def read_text_file(path: Path) -> str:
+    """Read plain text using common encodings for marketplace exports."""
+    for encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(errors="replace")
+
+
+def render_file_preview(file_record: ProjectFile) -> None:
+    """Render a type-specific preview for an uploaded file."""
+    path = resolve_saved_path(file_record.saved_path)
+    file_type = file_record.file_type.lower()
+
+    if not path.exists():
+        st.warning(f"本地文件不存在：{file_record.saved_path}")
+        return
+
+    if file_type == "csv":
+        try:
+            preview = pd.read_csv(path, nrows=20)
+            st.dataframe(preview, use_container_width=True)
+        except UnicodeDecodeError:
+            preview = pd.read_csv(path, nrows=20, encoding="gb18030")
+            st.dataframe(preview, use_container_width=True)
+        return
+
+    if file_type == "xlsx":
+        preview = pd.read_excel(path, nrows=20)
+        st.dataframe(preview, use_container_width=True)
+        return
+
+    if file_type == "txt":
+        text = read_text_file(path)
+        st.text_area("TXT 正文", value=text, height=260, disabled=True)
+        return
+
+    if file_type == "docx":
+        document = Document(path)
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+        shown = text[:TEXT_PREVIEW_LIMIT]
+        if not shown:
+            st.info("未从 DOCX 中提取到正文。")
+        else:
+            st.text_area("DOCX 正文预览（前 2000 字符）", value=shown, height=300, disabled=True)
+        return
+
+    if file_type == "pdf":
+        st.info(f"PDF 已保存，暂不解析：{file_record.filename}")
+        return
+
+    if file_type in IMAGE_FILE_TYPES:
+        st.image(str(path), caption=file_record.filename, width=220)
+        return
+
+    st.info("该文件类型暂不支持预览。")
+
+
+def render_file_upload_center(project: Project) -> None:
+    """Render project file upload area and uploaded file list."""
+    st.subheader("文件上传与资料解析")
+    st.caption("支持 xlsx、csv、docx、pdf、jpg、png、txt。文件会保存到当前项目 uploads 文件夹，并写入 SQLite。")
+
+    with st.form(f"upload_files_{project.id}", clear_on_submit=True):
+        uploaded_files = st.file_uploader(
+            "上传项目资料",
+            type=ALLOWED_FILE_TYPES,
+            accept_multiple_files=True,
+            help="Excel/CSV 将预览前 20 行；TXT/DOCX 将展示正文；PDF 仅保存；图片展示缩略图。",
+        )
+        submitted = st.form_submit_button("保存上传文件", type="primary")
+
+    if submitted:
+        if not uploaded_files:
+            st.warning("请先选择至少一个文件。")
+        else:
+            saved_files = [save_uploaded_file(project.id, uploaded_file) for uploaded_file in uploaded_files]
+            st.success(f"已上传 {len(saved_files)} 个文件。")
+            st.rerun()
+
+    files = list_project_files(project.id)
+    st.subheader("当前项目已上传文件")
+    if not files:
+        st.info("当前项目还没有上传文件。")
+        return
+
+    st.dataframe(
+        [
+            {
+                "文件名": item.filename,
+                "文件类型": item.file_type,
+                "保存路径": item.saved_path,
+                "上传时间": item.uploaded_at,
+            }
+            for item in files
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    for item in files:
+        with st.expander(f"{item.filename} · {item.file_type} · {item.uploaded_at}"):
+            st.caption(f"保存路径：`{item.saved_path}`")
+            try:
+                render_file_preview(item)
+            except Exception as exc:  # noqa: BLE001 - Streamlit should show per-file parsing failures without crashing.
+                st.error(f"预览失败：{exc}")
+
 
 def render_placeholder_page(page_name: str, project: Project | None) -> None:
     """Render an empty but clickable first-phase feature page."""
@@ -191,7 +364,7 @@ def main() -> None:
     """Application entry point."""
     initialize_database()
     st.title(APP_TITLE)
-    st.caption("内部运营工具 · 第一阶段基础框架")
+    st.caption("内部运营工具 · 第二阶段文件上传与资料解析")
 
     projects = load_projects()
     selected_project = render_project_controls(projects)
