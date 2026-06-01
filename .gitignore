@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Amazon AI Operation Command Center local runtime data
+amazon_ai_ops_center/data/*.sqlite3
+amazon_ai_ops_center/data/*.sqlite3-*
+amazon_ai_ops_center/projects/*
+!amazon_ai_ops_center/projects/.gitkeep
