@@ -30,6 +30,18 @@ class Project:
     updated_at: str
 
 
+@dataclass(slots=True)
+class ProjectFile:
+    """A file uploaded into a project's资料中心."""
+
+    id: str
+    project_id: str
+    filename: str
+    file_type: str
+    saved_path: str
+    uploaded_at: str
+
+
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
     """Open a SQLite connection with row access enabled."""
@@ -44,7 +56,7 @@ def get_connection() -> Iterator[sqlite3.Connection]:
 
 
 def initialize_database() -> None:
-    """Create database tables required by the first-phase application."""
+    """Create database tables required by the application."""
     with get_connection() as conn:
         conn.execute(
             """
@@ -63,6 +75,25 @@ def initialize_database() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_files (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                saved_path TEXT NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_project_files_project_uploaded
+            ON project_files(project_id, uploaded_at DESC)
+            """
+        )
 
 
 def _row_to_project(row: sqlite3.Row) -> Project:
@@ -78,6 +109,17 @@ def _row_to_project(row: sqlite3.Row) -> Project:
         compliance_sensitive_words=row["compliance_sensitive_words"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _row_to_project_file(row: sqlite3.Row) -> ProjectFile:
+    return ProjectFile(
+        id=row["id"],
+        project_id=row["project_id"],
+        filename=row["filename"],
+        file_type=row["file_type"],
+        saved_path=row["saved_path"],
+        uploaded_at=row["uploaded_at"],
     )
 
 
@@ -140,8 +182,52 @@ def update_project(project_id: str, values: dict[str, str]) -> None:
         conn.execute(f"UPDATE projects SET {assignments} WHERE id = ?", params)
 
 
+def add_project_file(
+    *,
+    project_id: str,
+    filename: str,
+    file_type: str,
+    saved_path: str,
+) -> ProjectFile:
+    """Record an uploaded file in SQLite."""
+    uploaded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    file_id = uuid.uuid4().hex
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO project_files (
+                id, project_id, filename, file_type, saved_path, uploaded_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (file_id, project_id, filename, file_type, saved_path, uploaded_at),
+        )
+    return get_project_file(file_id)  # type: ignore[return-value]
+
+
+def get_project_file(file_id: str) -> ProjectFile | None:
+    """Load an uploaded file record by ID."""
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM project_files WHERE id = ?", (file_id,)).fetchone()
+    return _row_to_project_file(row) if row else None
+
+
+def list_project_files(project_id: str) -> list[ProjectFile]:
+    """Return all uploaded files for a project, newest first."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM project_files
+            WHERE project_id = ?
+            ORDER BY uploaded_at DESC, filename ASC
+            """,
+            (project_id,),
+        ).fetchall()
+    return [_row_to_project_file(row) for row in rows]
+
+
 def delete_project(project_id: str) -> None:
     """Delete a project record and its local folder tree."""
     with get_connection() as conn:
+        conn.execute("DELETE FROM project_files WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     delete_project_folders(project_id)
