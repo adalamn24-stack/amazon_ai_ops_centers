@@ -24,6 +24,13 @@ from services.database import (
     list_projects,
     update_project,
 )
+from services.competitor_service import (
+    FILE_PURPOSE_OPTIONS,
+    CompetitorAnalysisSettings,
+    SelectedCompetitorFile,
+    extract_file_context,
+    run_competitor_analysis,
+)
 from services.llm_service import get_openai_api_key, mask_api_key, set_current_project
 from services.project_files import create_project_folders, project_root
 
@@ -388,6 +395,194 @@ def render_file_upload_center(project: Project) -> None:
                 st.error(f"预览失败：{exc}")
 
 
+
+def _non_empty_competitor_rows(rows: object) -> list[dict[str, object]]:
+    """Keep competitor rows that contain at least one meaningful value."""
+    if isinstance(rows, pd.DataFrame):
+        iterable_rows = rows.to_dict(orient="records")
+    else:
+        iterable_rows = list(rows) if rows is not None else []
+
+    cleaned: list[dict[str, object]] = []
+    for row in iterable_rows:
+        normalized = {key: ("" if value is None else value) for key, value in row.items()}
+        if any(str(value).strip() for value in normalized.values()):
+            cleaned.append(normalized)
+    return cleaned
+
+
+def _project_file_options(project: Project) -> dict[str, ProjectFile]:
+    """Build labels for current project upload selection."""
+    files = [item for item in list_project_files(project.id) if item.file_type.lower() in ALLOWED_FILE_TYPES]
+    return {f"{item.filename} · {item.file_type} · {item.uploaded_at}": item for item in files}
+
+
+def render_competitor_analysis(project: Project | None) -> None:
+    """Render the fourth-phase competitor analysis module."""
+    st.header("竞品分析")
+    st.caption("第4阶段：基于手动输入和当前项目 uploads 文件生成竞品分析、图片/A+分析、机会点与导出文件。")
+    st.info("本模块不会自动爬取 Amazon 页面，也不会自动登录 Amazon；请通过手动输入或上传文件提供竞品资料。")
+
+    if project is None:
+        st.warning("请先在左侧创建或选择项目。")
+        return
+
+    st.subheader("1. 竞品手动输入表")
+    default_rows = [
+        {
+            "ASIN": "",
+            "Amazon 链接": "",
+            "品牌": "",
+            "标题": "",
+            "价格": "",
+            "星级评分": "",
+            "评论数量": "",
+            "变体数量": "",
+            "核心卖点": "",
+            "备注": "",
+        }
+        for _ in range(3)
+    ]
+    competitor_rows = st.data_editor(
+        default_rows,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key=f"competitor_rows_{project.id}",
+        column_config={
+            "Amazon 链接": st.column_config.TextColumn(width="medium"),
+            "标题": st.column_config.TextColumn(width="large"),
+            "核心卖点": st.column_config.TextColumn(width="large"),
+            "备注": st.column_config.TextColumn(width="medium"),
+        },
+    )
+    competitors = _non_empty_competitor_rows(competitor_rows)
+
+    st.subheader("2. 选择项目已上传文件")
+    file_options = _project_file_options(project)
+    selected_labels: list[str] = []
+    selected_files: list[SelectedCompetitorFile] = []
+    if not file_options:
+        st.info("当前项目 uploads 中暂无可用于竞品分析的文件。可先到“项目资料中心”上传 xlsx/csv/txt/docx/jpg/jpeg/png/pdf。")
+    else:
+        selected_labels = st.multiselect(
+            "从当前项目 uploads 文件中选择资料",
+            options=list(file_options.keys()),
+            help="支持 xlsx、csv、txt、docx、jpg、jpeg、png、pdf。",
+            key=f"competitor_selected_files_{project.id}",
+        )
+
+        if selected_labels:
+            st.subheader("3. 文件用途分类")
+            for label in selected_labels:
+                item = file_options[label]
+                default_index = 0
+                lower_name = item.filename.lower()
+                if "keyword" in lower_name or "关键词" in lower_name:
+                    default_index = FILE_PURPOSE_OPTIONS.index("竞品关键词表")
+                elif "a+" in lower_name or "aplus" in lower_name:
+                    default_index = FILE_PURPOSE_OPTIONS.index("竞品 A+ 截图")
+                elif item.file_type.lower() in IMAGE_FILE_TYPES:
+                    default_index = FILE_PURPOSE_OPTIONS.index("竞品主图截图")
+                purpose = st.selectbox(
+                    f"{item.filename} 的用途",
+                    FILE_PURPOSE_OPTIONS,
+                    index=default_index,
+                    key=f"competitor_purpose_{project.id}_{item.id}",
+                )
+                selected_files.append(
+                    SelectedCompetitorFile(
+                        filename=item.filename,
+                        file_type=item.file_type,
+                        saved_path=item.saved_path,
+                        purpose=purpose,
+                    )
+                )
+
+            context, image_paths, read_errors = extract_file_context(selected_files)
+            if read_errors:
+                st.error("部分文件读取失败，AI 分析会跳过失败文件。")
+                for error in read_errors:
+                    st.error(error)
+
+            with st.expander("文件读取预检查", expanded=False):
+                st.caption(f"可读取文本/表格摘要长度：{len(context)} 字符；图片数量：{len(image_paths)}")
+                if read_errors:
+                    st.warning("上方已显示具体文件读取失败原因。")
+                else:
+                    st.success("已选择文件均可用于分析（PDF 仅记录文件信息，不自动解析正文）。")
+
+    st.subheader("4. 分析设置")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        target_sites = ["US", "UK", "DE", "FR", "IT", "ES", "CA", "JP"]
+        default_site_index = target_sites.index(project.site) if project.site in target_sites else 0
+        target_site = st.selectbox("目标站点", target_sites, index=default_site_index)
+    with col2:
+        risk_type = st.selectbox(
+            "产品风险类型",
+            ["普通产品", "膳食补充剂", "美容个护", "红光LED", "EMS", "宠物用品", "医疗器械高风险"],
+        )
+    with col3:
+        output_language = st.selectbox("输出语言", ["中文说明 + 英文运营表达"])
+    with col4:
+        analysis_depth = st.selectbox("分析深度", ["标准", "简版", "深度"])
+
+    st.divider()
+    api_key = get_openai_api_key()
+    if not api_key:
+        st.warning("未检测到 OPENAI_API_KEY。请先在 .env 或环境变量中配置 API Key，页面不会崩溃，但 AI 分析按钮将不可用。")
+
+    can_analyze = bool(api_key) and (bool(competitors) or bool(selected_files))
+    if not competitors and not selected_files:
+        st.info("请至少提供一种竞品资料：填写竞品表，或选择当前项目 uploads 中的文件。")
+
+    if st.button("生成竞品分析报告", type="primary", disabled=not can_analyze, use_container_width=True):
+        settings = CompetitorAnalysisSettings(
+            target_site=target_site,
+            product_risk_type=risk_type,
+            output_language=output_language,
+            analysis_depth=analysis_depth,
+        )
+        try:
+            with st.spinner("AI 正在生成竞品分析报告，请稍候..."):
+                result = run_competitor_analysis(project.id, competitors, selected_files, settings)
+            st.session_state[f"competitor_result_{project.id}"] = {
+                "markdown": result.markdown,
+                "markdown_path": str(result.markdown_path),
+                "excel_path": str(result.excel_path),
+            }
+            st.success("竞品分析报告已生成并保存到当前项目 outputs 文件夹。")
+        except Exception as exc:  # noqa: BLE001 - keep Streamlit state and show UI-safe AI/file errors.
+            st.error(f"AI 调用或导出失败：{exc}")
+
+    result_state = st.session_state.get(f"competitor_result_{project.id}")
+    if result_state:
+        st.subheader("分析结果")
+        st.caption(f"Markdown：`{result_state['markdown_path']}`")
+        st.caption(f"Excel：`{result_state['excel_path']}`")
+        st.markdown(result_state["markdown"])
+
+        markdown_path = Path(result_state["markdown_path"])
+        excel_path = Path(result_state["excel_path"])
+        dl_col1, dl_col2 = st.columns(2)
+        if markdown_path.exists():
+            dl_col1.download_button(
+                "下载 Markdown 报告",
+                data=markdown_path.read_bytes(),
+                file_name="competitor_analysis.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+        if excel_path.exists():
+            dl_col2.download_button(
+                "下载 Excel 报告",
+                data=excel_path.read_bytes(),
+                file_name="competitor_analysis.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
 def render_placeholder_page(page_name: str, project: Project | None) -> None:
     """Render an empty but clickable first-phase feature page."""
     st.header(page_name)
@@ -402,7 +597,7 @@ def main() -> None:
     """Application entry point."""
     initialize_database()
     st.title(APP_TITLE)
-    st.caption("内部运营工具 · 第三阶段 OpenAI 服务封装")
+    st.caption("内部运营工具 · 第四阶段竞品分析模块")
 
     projects = load_projects()
     selected_project = render_project_controls(projects)
@@ -412,6 +607,8 @@ def main() -> None:
 
     if page == "项目资料中心":
         render_project_profile(selected_project)
+    elif page == "竞品分析":
+        render_competitor_analysis(selected_project)
     else:
         render_placeholder_page(page, selected_project)
 
