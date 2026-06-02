@@ -225,6 +225,20 @@ def list_project_files(project_id: str) -> list[ProjectFile]:
     return [_row_to_project_file(row) for row in rows]
 
 
+def delete_project_file(file_id: str, project_id: str) -> ProjectFile | None:
+    """Delete one uploaded file record that belongs to a project."""
+    file_record = get_project_file(file_id)
+    if file_record is None or file_record.project_id != project_id:
+        return None
+
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM project_files WHERE id = ? AND project_id = ?",
+            (file_id, project_id),
+        )
+    return file_record
+
+
 def delete_project(project_id: str) -> None:
     """Delete a project record and its local folder tree."""
     with get_connection() as conn:

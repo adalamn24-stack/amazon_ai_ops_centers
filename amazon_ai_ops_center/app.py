@@ -17,6 +17,7 @@ from services.database import (
     add_project_file,
     create_project,
     delete_project,
+    delete_project_file,
     get_project,
     initialize_database,
     list_project_files,
@@ -26,8 +27,8 @@ from services.database import (
 from services.project_files import create_project_folders, project_root
 
 APP_TITLE = "Amazon AI Operation Command Center V1.0"
-ALLOWED_FILE_TYPES = ["xlsx", "csv", "docx", "pdf", "jpg", "png", "txt"]
-IMAGE_FILE_TYPES = {"jpg", "png"}
+ALLOWED_FILE_TYPES = ["xlsx", "csv", "docx", "pdf", "jpg", "jpeg", "png", "txt"]
+IMAGE_FILE_TYPES = {"jpg", "jpeg", "png"}
 TEXT_PREVIEW_LIMIT = 2_000
 NAV_ITEMS = [
     "项目资料中心",
@@ -240,6 +241,25 @@ def resolve_saved_path(saved_path: str) -> Path:
     return Path(__file__).resolve().parent / path
 
 
+def delete_uploaded_file(project_id: str, file_id: str, saved_path: str) -> None:
+    """Remove an uploaded file from disk and delete its SQLite metadata row."""
+    path = resolve_saved_path(saved_path)
+    upload_dir = (project_root(project_id) / "uploads").resolve()
+    resolved_path = path.resolve()
+
+    if resolved_path.exists():
+        if upload_dir not in resolved_path.parents:
+            st.error(f"拒绝删除 uploads 目录之外的文件：{saved_path}")
+            return
+        resolved_path.unlink()
+
+    deleted_record = delete_project_file(file_id, project_id)
+    if deleted_record is None:
+        st.warning("未找到该文件记录，可能已经被删除。")
+    else:
+        st.success(f"已删除上传文件：{deleted_record.filename}")
+
+
 def read_text_file(path: Path) -> str:
     """Read plain text using common encodings for marketplace exports."""
     for encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
@@ -290,6 +310,7 @@ def render_file_preview(file_record: ProjectFile) -> None:
 
     if file_type == "pdf":
         st.info(f"PDF 已保存，暂不解析：{file_record.filename}")
+        st.code(file_record.saved_path, language="text")
         return
 
     if file_type in IMAGE_FILE_TYPES:
@@ -302,7 +323,7 @@ def render_file_preview(file_record: ProjectFile) -> None:
 def render_file_upload_center(project: Project) -> None:
     """Render project file upload area and uploaded file list."""
     st.subheader("文件上传与资料解析")
-    st.caption("支持 xlsx、csv、docx、pdf、jpg、png、txt。文件会保存到当前项目 uploads 文件夹，并写入 SQLite。")
+    st.caption("支持 xlsx、csv、docx、pdf、jpg、jpeg、png、txt。文件会保存到当前项目 uploads 文件夹，并写入 SQLite。")
 
     with st.form(f"upload_files_{project.id}", clear_on_submit=True):
         uploaded_files = st.file_uploader(
@@ -343,7 +364,12 @@ def render_file_upload_center(project: Project) -> None:
 
     for item in files:
         with st.expander(f"{item.filename} · {item.file_type} · {item.uploaded_at}"):
-            st.caption(f"保存路径：`{item.saved_path}`")
+            meta_col, action_col = st.columns([4, 1])
+            meta_col.caption(f"保存路径：`{item.saved_path}`")
+            if action_col.button("删除文件", key=f"delete_file_{item.id}", type="secondary"):
+                delete_uploaded_file(project.id, item.id, item.saved_path)
+                st.rerun()
+
             try:
                 render_file_preview(item)
             except Exception as exc:  # noqa: BLE001 - Streamlit should show per-file parsing failures without crashing.
