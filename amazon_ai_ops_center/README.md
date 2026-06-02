@@ -1,6 +1,6 @@
 # Amazon AI Operation Command Center V1.0
 
-内部使用的 Streamlit 运营工具。当前已完成第三阶段：保留项目资料中心、文件上传与预览能力，并新增 OpenAI 服务封装模块、AI 配置检查和 Markdown 输出落盘能力。
+内部使用的 Streamlit 运营工具。当前已完成第四阶段：在保留项目资料中心、文件上传与预览、OpenAI 服务封装和 AI 配置检查能力的基础上，新增“竞品分析”模块，可基于用户手动输入和当前项目上传文件生成竞品分析报告、图片/A+分析、机会点和导出文件。
 
 ## 功能范围
 
@@ -40,6 +40,16 @@
   - `analyze_text_with_prompt(text, prompt)`
   - `analyze_images_with_prompt(image_paths, prompt)`
 - 所有 AI 输出会保存为 Markdown 文件；当页面已选择项目时，输出保存到当前项目的 `projects/{project_id}/outputs/` 文件夹。
+- “竞品分析”模块支持：
+  - 手动录入多个竞品的 ASIN、Amazon 链接、品牌、标题、价格、评分、评论数、变体数、核心卖点和备注。
+  - 从当前项目 `uploads` 文件夹选择 xlsx、csv、txt、docx、jpg、jpeg、png、pdf 资料。
+  - 为已选文件标记用途：竞品评论表、竞品关键词表、竞品 Listing 文案、竞品主图截图、竞品 A+ 截图、竞品页面截图、其他资料。
+  - 设置目标站点（US/UK/DE/FR/IT/ES/CA/JP）、产品风险类型、输出语言和分析深度。
+  - 调用 `services/llm_service.py` 中的文本/图片分析能力生成结构化竞品分析报告。
+  - 当未配置 `OPENAI_API_KEY` 时提示先配置 API Key，不崩溃、不触发 AI 调用。
+  - 不自动爬取 Amazon 页面，不自动登录 Amazon；资料来源仅为用户手动输入和上传文件。
+  - 导出并提供下载：`projects/{project_id}/outputs/competitor_analysis.md` 和 `projects/{project_id}/outputs/competitor_analysis.xlsx`。
+
 
 ## 目录结构
 
@@ -56,9 +66,13 @@ amazon_ai_ops_center/
 │       ├── uploads/
 │       └── outputs/
 ├── services/
+│   ├── competitor_service.py
 │   ├── database.py
 │   ├── llm_service.py
-│   └── project_files.py
+│   ├── project_files.py
+│   └── report_export_service.py
+├── prompts/
+│   └── competitor_analysis_prompt.md
 └── utils/
 ```
 
@@ -103,7 +117,26 @@ amazon_ai_ops_center/
    python -m streamlit run app.py
    ```
 
-浏览器打开 Streamlit 提示的本地地址后，即可创建产品项目、填写项目资料、上传项目文件、查看解析预览、检查 OpenAI 配置状态，并为后续 AI 分析模块复用统一服务封装。
+浏览器打开 Streamlit 提示的本地地址后，即可创建产品项目、填写项目资料、上传项目文件、查看解析预览、检查 OpenAI 配置状态，并使用“竞品分析”模块生成和下载竞品报告。
+
+## 第4阶段：竞品分析模块使用方法
+
+1. 在左侧先创建或选择一个产品项目。
+2. 如需使用文件资料，先进入“项目资料中心”上传竞品评论表、关键词表、Listing 文案、主图/A+截图或其他资料。
+3. 进入左侧“竞品分析”：
+   - 在“竞品手动输入表”中录入一个或多个竞品。
+   - 在“选择项目已上传文件”中勾选当前项目 uploads 文件。
+   - 给每个文件设置用途分类，帮助 AI 区分评论、关键词、Listing、主图、A+、页面截图或其他资料。
+   - 设置目标站点、产品风险类型、输出语言和分析深度。
+4. 确认已配置 `OPENAI_API_KEY` 后点击“生成竞品分析报告”。如果没有 API Key，页面会提示先配置，按钮不可用。
+5. 报告生成后会展示在页面中，并保存到当前项目 outputs 文件夹：
+   - Markdown：`projects/{project_id}/outputs/competitor_analysis.md`
+   - Excel：`projects/{project_id}/outputs/competitor_analysis.xlsx`
+6. 页面底部提供“下载 Markdown 报告”和“下载 Excel 报告”按钮。
+
+Excel 文件包含以下 sheet：竞品基础信息、竞品卖点分析、评论VOC分析、关键词分析、主图分析、A+分析、机会点总结、主图Brief、A+Brief。
+
+注意：PDF 当前仅记录文件信息，不自动解析正文；如需 AI 深度分析 PDF 内容，请把关键内容另存为 TXT/DOCX/CSV 后上传。
 
 ## AI 服务封装说明
 
