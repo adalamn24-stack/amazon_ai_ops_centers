@@ -24,6 +24,7 @@ from services.database import (
     list_projects,
     update_project,
 )
+from services.llm_service import get_openai_api_key, mask_api_key, set_current_project
 from services.project_files import create_project_folders, project_root
 
 APP_TITLE = "Amazon AI Operation Command Center V1.0"
@@ -122,6 +123,17 @@ def render_project_controls(projects: list[Project]) -> Project | None:
                 st.success("项目已删除。")
                 st.rerun()
     return selected_project
+
+
+def render_ai_config_check() -> None:
+    """Render OpenAI API key configuration status without exposing the full key."""
+    st.sidebar.subheader("AI配置检查")
+    api_key = get_openai_api_key()
+    if not api_key:
+        st.sidebar.warning("未检测到 OPENAI_API_KEY，请在 .env 中配置后使用 AI 功能。")
+        st.sidebar.code("OPENAI_API_KEY=your_api_key_here", language="text")
+    else:
+        st.sidebar.success(f"OPENAI_API_KEY 已配置：{mask_api_key(api_key)}")
 
 
 def render_navigation() -> str:
@@ -390,10 +402,12 @@ def main() -> None:
     """Application entry point."""
     initialize_database()
     st.title(APP_TITLE)
-    st.caption("内部运营工具 · 第二阶段文件上传与资料解析")
+    st.caption("内部运营工具 · 第三阶段 OpenAI 服务封装")
 
     projects = load_projects()
     selected_project = render_project_controls(projects)
+    set_current_project(selected_project.id if selected_project else None)
+    render_ai_config_check()
     page = render_navigation()
 
     if page == "项目资料中心":

@@ -1,6 +1,6 @@
 # Amazon AI Operation Command Center V1.0
 
-内部使用的 Streamlit 运营工具。当前已完成第二阶段：在项目资料中心支持文件上传、SQLite 文件元数据管理，以及常见资料格式的页面预览。
+内部使用的 Streamlit 运营工具。当前已完成第三阶段：保留项目资料中心、文件上传与预览能力，并新增 OpenAI 服务封装模块、AI 配置检查和 Markdown 输出落盘能力。
 
 ## 功能范围
 
@@ -21,7 +21,7 @@
   - 主图A+提示词
   - 导出运营包
 - 项目资料中心支持填写并保存：产品名称、站点、品牌、类目、产品核心参数、目标人群、使用场景、合规敏感词。
-- 项目资料中心新增文件上传与资料解析区域：
+- 项目资料中心支持文件上传与资料解析：
   - 支持上传 `xlsx`、`csv`、`docx`、`pdf`、`jpg`、`jpeg`、`png`、`txt`。
   - 上传文件保存到当前项目的 `uploads` 文件夹。
   - 文件元数据写入 SQLite，包括文件名、文件类型、保存路径、上传时间、所属项目 ID。
@@ -31,6 +31,15 @@
   - PDF 当前只保存，不做正文解析，页面显示文件名和保存路径。
   - JPG/JPEG/PNG 在页面显示缩略图。
   - 当前项目已上传文件会以列表形式展示，并可展开查看预览或删除文件。
+- 页面左侧新增“AI配置检查”：
+  - 未检测到 `OPENAI_API_KEY` 时提示用户在 `.env` 中配置。
+  - 已检测到 `OPENAI_API_KEY` 时只展示脱敏状态，不显示完整 Key。
+- `services/llm_service.py` 封装 OpenAI 调用：
+  - `generate_text(system_prompt, user_prompt, model="gpt-4.1-mini")`
+  - `analyze_table_with_prompt(df, prompt)`
+  - `analyze_text_with_prompt(text, prompt)`
+  - `analyze_images_with_prompt(image_paths, prompt)`
+- 所有 AI 输出会保存为 Markdown 文件；当页面已选择项目时，输出保存到当前项目的 `projects/{project_id}/outputs/` 文件夹。
 
 ## 目录结构
 
@@ -41,11 +50,15 @@ amazon_ai_ops_center/
 ├── README.md
 ├── .env.example
 ├── data/
+├── outputs/
 ├── projects/
 │   └── {project_id}/
 │       ├── uploads/
 │       └── outputs/
 ├── services/
+│   ├── database.py
+│   ├── llm_service.py
+│   └── project_files.py
 └── utils/
 ```
 
@@ -70,13 +83,19 @@ amazon_ai_ops_center/
    pip install -r requirements.txt
    ```
 
-4. 按需复制环境变量示例文件：
+4. 复制环境变量示例文件并配置 OpenAI API Key：
 
    ```bash
    cp .env.example .env
    ```
 
-   > `.env.example` 不包含任何真实 API Key。请不要把真实密钥提交到代码仓库。
+   在 `.env` 中设置：
+
+   ```text
+   OPENAI_API_KEY=your_api_key_here
+   ```
+
+   > `.env.example` 不包含任何真实 API Key。请不要把真实密钥提交到代码仓库，也不要在日志、截图或 README 中粘贴真实 Key。
 
 5. 启动 Streamlit：
 
@@ -84,13 +103,24 @@ amazon_ai_ops_center/
    python -m streamlit run app.py
    ```
 
-浏览器打开 Streamlit 提示的本地地址后，即可创建产品项目、填写项目资料、上传项目文件、查看解析预览并删除不需要的上传文件。
+浏览器打开 Streamlit 提示的本地地址后，即可创建产品项目、填写项目资料、上传项目文件、查看解析预览、检查 OpenAI 配置状态，并为后续 AI 分析模块复用统一服务封装。
+
+## AI 服务封装说明
+
+- `OPENAI_API_KEY` 由项目根目录下的 `.env` 或系统环境变量读取。
+- 默认模型为 `gpt-4.1-mini`，可在 `generate_text` 调用时通过 `model` 参数覆盖。
+- 表格分析默认将 DataFrame 前 100 行转换为 Markdown 表格发送给模型。
+- 文本分析会把业务提示词和待分析文本组合后发送给模型。
+- 图片分析会把本地图片转换为 data URL 后发送给支持视觉输入的模型。
+- SDK 异常、缺少 API Key、缺少依赖、空输入、空响应等情况会转换为面向页面的错误信息。
+- 服务层不会打印或记录完整 API Key。
 
 ## 数据说明
 
 - 默认 SQLite 数据库路径：`data/ops_center.sqlite3`。
 - 默认项目文件根目录：`projects/`。
 - 上传文件默认保存在：`projects/{project_id}/uploads/`。
+- AI 输出默认保存在：当前项目的 `projects/{project_id}/outputs/`。
 - 可在 `.env` 中通过 `DATABASE_PATH` 和 `PROJECTS_DIR` 覆盖默认路径。
 - SQLite 表：
   - `projects`：项目基础资料。
@@ -98,7 +128,8 @@ amazon_ai_ops_center/
 
 ## 注意事项
 
-- PDF 第二阶段仅做保存与文件名、保存路径展示，暂不做正文解析。
+- PDF 当前仅做保存与文件名、保存路径展示，暂不做正文解析。
 - CSV 默认优先按 UTF-8 读取；若遇到编码问题，会尝试使用 GB18030。
 - DOCX 预览仅提取段落文本，不处理复杂表格、图片或批注。
+- `.env.example` 中的 `OPENAI_API_KEY=your_api_key_here` 只是占位符，复制后必须替换为真实 Key 才会显示已配置。
 - 依赖版本使用 Python 3.12 兼容范围，避免固定到不兼容版本。
